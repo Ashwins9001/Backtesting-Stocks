@@ -1,67 +1,78 @@
 import pandas as pd
 import numpy as np
 
+
 class BacktestEngine:
-    def __init__(self, data, strategy, initial_cash=10000):
-        self.data = data.copy()  # work on a copy
+    def __init__(self, data, strategy, initial_cash=10000, fee=0.0):
+        self.data = data.copy()
         self.strategy = strategy
         self.initial_cash = initial_cash
-        self.metrics = {}  # store performance metrics
+        self.fee = fee
+        self.metrics = {}
+
+        if 'price' not in self.data.columns:
+            raise ValueError("Data must contain a 'price' column")
 
     def run(self):
-        signals = self.strategy.generate_signals(self.data)  # Series of 0/1
+        df = self.data
 
-        # Initialize columns
-        self.data['position'] = 0.0
-        self.data['cash'] = self.initial_cash
-        self.data['equity'] = self.initial_cash
+        # --- Generate signals ---
+        signals = self.strategy.generate_signals(df)
 
-        cash = self.initial_cash
-        position = 0.0
-        equity = []
+        # Align + clean
+        signals = signals.reindex(df.index).fillna(0)
 
-        prices = self.data['price'].to_numpy()
-        signals = signals.to_numpy()
+        # --- Remove lookahead bias ---
+        df['signal'] = signals.shift(1).fillna(0)
 
-        # Loop through prices and signals
-        for price, signal in zip(prices, signals):
-            if signal == 1 and cash > 0:
-                position = cash / price
-                cash = 0
-            elif signal == 0 and position > 0:
-                cash = position * price
-                position = 0
-            equity.append(cash + position * price)
+        # Convert to position (0 or 1)
+        df['position'] = df['signal']
 
-        self.data['equity'] = equity  # scalar values only
+        # --- Market returns ---
+        df['returns'] = df['price'].pct_change().fillna(0)
 
-        # --- Compute performance metrics ---
-        # Daily returns
-        self.data['returns'] = self.data['equity'].pct_change().fillna(0)
+        # --- Strategy returns ---
+        df['strategy_returns'] = df['position'] * df['returns']
+
+        # --- Transaction costs ---
+        trades = df['position'].diff().abs().fillna(0)
+        df['strategy_returns'] -= trades * self.fee
+
+        # --- Equity curve ---
+        df['equity'] = self.initial_cash * (1 + df['strategy_returns']).cumprod()
+
+        # --- Compute metrics ---
+        self._compute_metrics(df)
+
+        self.data = df
+        return df
+
+    def _compute_metrics(self, df):
+        returns = df['strategy_returns']
 
         # Sharpe ratio (annualized)
-        daily_returns = self.data['returns']
-        self.metrics['sharpe'] = daily_returns.mean() / (daily_returns.std() + 1e-9) * np.sqrt(252)
+        sharpe = returns.mean() / (returns.std() + 1e-9) * np.sqrt(252)
 
         # CAGR
-        start_val = self.data['equity'].iloc[0]
-        end_val = self.data['equity'].iloc[-1]
-        total_days = (self.data.index[-1] - self.data.index[0]).days if isinstance(self.data.index[0], pd.Timestamp) else len(self.data)
-        total_years = max(total_days / 365.25, 1e-9)
-        self.metrics['cagr'] = (end_val / start_val) ** (1 / total_years) - 1
+        total_periods = len(df)
+        years = total_periods / 252  # assumes daily data
+        cagr = (df['equity'].iloc[-1] / df['equity'].iloc[0]) ** (1 / years) - 1
+
+        # Max drawdown
+        equity = df['equity']
+        cummax = equity.cummax()
+        drawdown = (equity - cummax) / cummax
+        max_drawdown = drawdown.min()
 
         # Win/loss ratio
-        wins = (daily_returns > 0).sum()
-        losses = (daily_returns < 0).sum()
-        self.metrics['win_loss_ratio'] = wins / max(losses, 1)
+        wins = (returns > 0).sum()
+        losses = (returns < 0).sum()
+        win_loss_ratio = wins / max(losses, 1)
 
-        # RSI
-        delta = self.data['price'].diff()
-        gain = delta.clip(lower=0)
-        loss = -delta.clip(upper=0)
-        roll_gain = gain.rolling(14).mean()
-        roll_loss = loss.rolling(14).mean()
-        rs = roll_gain / (roll_loss + 1e-9)
-        self.data['RSI'] = 100 - (100 / (1 + rs))
-
-        return self.data
+        # Store metrics cleanly
+        self.metrics = {
+            "sharpe": sharpe,
+            "cagr": cagr,
+            "max_drawdown": max_drawdown,
+            "win_loss_ratio": win_loss_ratio,
+        }

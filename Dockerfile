@@ -33,4 +33,5 @@ RUN pip install --no-cache-dir \
     numpy \
     yfinance \
     pyarrow \
-    psycopg2-binary
+    psycopg2-binary \
+    matplotlib

@@ -3,10 +3,12 @@ from airflow.operators.python import PythonOperator
 from datetime import datetime
 from data.fetch import fetch_prices
 from data.storage import save_parquet
+from data.storage import save_csv
 
 def fetch_and_store():
     df = fetch_prices("AAPL")
     save_parquet(df, "/opt/airflow/data/raw/aapl.parquet")
+    save_csv(df, "/opt/airflow/data/raw/aapl.csv")
 
 with DAG(
     dag_id="market_data_pipeline",

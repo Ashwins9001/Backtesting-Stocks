@@ -6,3 +6,7 @@ def save_parquet(df, path):
 
 def load_parquet(path):
     return pd.read_parquet(path)
+
+def save_csv(df, path):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    df.to_csv(path)
