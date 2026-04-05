@@ -1,0 +1,9 @@
+symbols:
+  - AAPL
+  - MSFT
+
+backtest:
+  initial_cash: 10000
+
+data:
+  start_date: "2020-01-01"
