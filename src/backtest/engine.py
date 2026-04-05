@@ -3,12 +3,6 @@ import numpy as np
 
 class BacktestEngine:
     def __init__(self, data, strategy, initial_cash=10000, fee=0.0):
-        """
-        data: pd.DataFrame with 'price' and optionally 'volume'
-        strategy: strategy object with generate_signals(df) -> 0..1 signals
-        initial_cash: starting capital
-        fee: proportional transaction fee (e.g., 0.001 = 0.1%)
-        """
         self.data = data.copy()
         self.strategy = strategy
         self.initial_cash = initial_cash
@@ -18,51 +12,79 @@ class BacktestEngine:
         if 'price' not in self.data.columns:
             raise ValueError("Data must contain a 'price' column")
         if 'volume' not in self.data.columns:
-            self.data['volume'] = 1  # default volume if missing
+            self.data['volume'] = 1
 
     def run(self):
         df = self.data.copy()
 
-        # --- Generate signals (fractional 0..1) ---
+        # --- Generate signals ---
         signals = self.strategy.generate_signals(df)
         signals = signals.reindex(df.index).fillna(0)
 
         # --- Remove lookahead bias ---
         df['signal'] = signals.shift(1).fillna(0)
 
-        # --- Initialize equity calculation ---
         prices = df['price'].to_numpy()
         signal_values = df['signal'].to_numpy()
+
         cash = self.initial_cash
-        position = 0.0
+        position = 0  # INTEGER shares only
         equity = []
+        shares_owned = []
 
         for i in range(len(prices)):
-            # --- Target position in $ based on fractional signal ---
-            target_position_value = self.initial_cash * signal_values[i]
-            target_shares = target_position_value / prices[i]
+            price = prices[i]
+            signal = signal_values[i]
 
-            # --- Shares to buy/sell ---
+            # --- Current total equity ---
+            total_equity = cash + position * price
+
+            # --- Target allocation ---
+            target_value = total_equity * signal
+
+            # --- Convert to INTEGER shares ---
+            target_shares = int(np.floor(target_value / price))
+
+            # --- Compute trade ---
             shares_to_trade = target_shares - position
-            trade_cost = shares_to_trade * prices[i]
 
-            # --- Apply transaction fee and update cash ---
-            cash -= trade_cost + abs(trade_cost) * self.fee
-            position = target_shares
+            # --------------------------
+            # BUY LOGIC (cannot exceed cash)
+            # --------------------------
+            if shares_to_trade > 0:
+                max_affordable = int(np.floor(cash / price))
+                shares_to_trade = min(shares_to_trade, max_affordable)
 
-            # --- Total equity = cash + position value ---
-            equity.append(cash + position * prices[i])
+            # --------------------------
+            # SELL LOGIC (cannot sell more than owned)
+            # --------------------------
+            elif shares_to_trade < 0:
+                shares_to_trade = max(shares_to_trade, -position)
 
-        df['position'] = signal_values       # fractional position
+            trade_cost = shares_to_trade * price
+
+            # --- Apply fees ---
+            fee_cost = abs(trade_cost) * self.fee
+
+            # --- Update cash & position ---
+            cash -= trade_cost + fee_cost
+            position += shares_to_trade
+
+            # --- Track ---
+            current_equity = cash + position * price
+            equity.append(current_equity)
+            shares_owned.append(position)
+
+        # --- Save columns ---
+        df['position'] = signal_values     # still fractional signal
+        df['shares'] = shares_owned        # INTEGER shares now
         df['equity'] = equity
 
-        # --- Market returns ---
+        # --- Returns ---
         df['returns'] = df['price'].pct_change().fillna(0)
-
-        # --- Strategy returns (equity curve changes) ---
         df['strategy_returns'] = df['equity'].pct_change().fillna(0)
 
-        # --- Compute metrics ---
+        # --- Metrics ---
         self._compute_metrics(df)
 
         self.data = df
@@ -71,29 +93,23 @@ class BacktestEngine:
     def _compute_metrics(self, df):
         returns = df['strategy_returns']
 
-        # --- Sharpe ratio (annualized) ---
         sharpe = returns.mean() / (returns.std() + 1e-9) * np.sqrt(252)
 
-        # --- CAGR ---
         total_periods = len(df)
         years = total_periods / 252
         cagr = (df['equity'].iloc[-1] / df['equity'].iloc[0]) ** (1 / years) - 1
 
-        # --- Max drawdown ---
         equity = df['equity']
         cummax = equity.cummax()
         drawdown = (equity - cummax) / cummax
         max_drawdown = drawdown.min()
 
-        # --- Win/loss ratio ---
         wins = (returns > 0).sum()
         losses = (returns < 0).sum()
         win_loss_ratio = wins / max(losses, 1)
 
-        # --- 95% Value at Risk (VaR) ---
         var_95 = np.percentile(returns, 5)
 
-        # --- Store metrics ---
         self.metrics = {
             "sharpe": sharpe,
             "cagr": cagr,
